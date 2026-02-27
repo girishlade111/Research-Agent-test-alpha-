@@ -1,0 +1,229 @@
+openapi: 3.1.0
+info:
+  title: Deep Research API
+  version: 0.2.0
+servers:
+  - url: https://api.example.com
+paths:
+  /api/health:
+    get:
+      summary: Health check
+      responses:
+        '200': { description: Service is healthy }
+  /api/me/profiles:
+    get:
+      summary: Public social/contact profile links
+      responses:
+        '200': { description: Profiles returned }
+  /api/projects:
+    post:
+      summary: Create a project
+      parameters:
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Project created }
+  /api/project/{projectId}/share:
+    post:
+      summary: Share project with role permissions
+      parameters:
+        - in: path
+          name: projectId
+          required: true
+          schema: { type: string }
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Shared }
+  /api/upload:
+    post:
+      summary: Upload file for a project
+      parameters:
+        - in: query
+          name: projectId
+          required: true
+          schema: { type: string }
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Upload accepted
+  /api/files:
+    get:
+      summary: List files by project
+      parameters:
+        - in: query
+          name: projectId
+          required: true
+          schema: { type: string }
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: File list }
+  /api/ingest/{fileId}:
+    post:
+      summary: Trigger parse/chunk/embed job
+      parameters:
+        - in: path
+          name: fileId
+          required: true
+          schema: { type: string }
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Ingestion completed }
+  /api/ingest/jobs/{jobId}:
+    get:
+      summary: Fetch ingestion job status
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Job status returned }
+  /api/query:
+    post:
+      summary: Research query with retrieval
+      parameters:
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryRequest'
+      responses:
+        '200':
+          description: Answer with sources
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  answerText: { type: string }
+                  sources:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SourceItem'
+                  followups:
+                    type: array
+                    items: { type: string }
+                  rawModelOutput: { type: string }
+  /api/files/{fileId}/preview:
+    get:
+      summary: Preview file near page and offset
+      parameters:
+        - in: path
+          name: fileId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: pageno
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: offset
+          schema: { type: integer, default: 0 }
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Snippet preview }
+  /api/project/{projectId}/pin-chunk:
+    post:
+      summary: Pin chunk into project context
+      parameters:
+        - in: path
+          name: projectId
+          required: true
+          schema: { type: string }
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Chunk pinned }
+  /api/settings/provider:
+    post:
+      summary: Configure LLM and embedding provider
+      parameters:
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Provider settings saved }
+  /api/audit/retrievals:
+    get:
+      summary: Owner audit log for retrieval activity
+      parameters:
+        - in: query
+          name: projectId
+          required: true
+          schema: { type: string }
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Audit records }
+components:
+  schemas:
+    QueryRequest:
+      type: object
+      required: [projectId, userId, query]
+      properties:
+        projectId: { type: string }
+        userId: { type: string }
+        query: { type: string }
+        topK: { type: integer, default: 10 }
+        useWeb: { type: boolean, default: false }
+        filters:
+          type: object
+          properties:
+            fileIds:
+              type: array
+              items: { type: string }
+            fileTypes:
+              type: array
+              items: { type: string }
+            dateRange:
+              type: array
+              items: { type: string }
+    SourceItem:
+      type: object
+      properties:
+        id: { type: string }
+        fileId: { type: [string, 'null'] }
+        filename: { type: string }
+        page: { type: [integer, 'null'] }
+        snippet: { type: string }
+        score: { type: number }
