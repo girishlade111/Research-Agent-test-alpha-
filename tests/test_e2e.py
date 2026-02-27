@@ -62,3 +62,19 @@ def test_delete_file_removes_chunks() -> None:
     assert store.project_chunks[p.id]
     store.remove_file(f.id)
     assert not store.project_chunks[p.id]
+
+
+def test_project_role_sharing_permissions() -> None:
+    store = InMemoryStore()
+    project = store.create_project("owner", "enterprise")
+    store.share_project(project.id, "analyst", "query")
+
+    store.ensure_project_access("owner", project.id, required="owner")
+    store.ensure_project_access("analyst", project.id, required="query")
+
+    denied = False
+    try:
+        store.ensure_project_access("analyst", project.id, required="write")
+    except PermissionError:
+        denied = True
+    assert denied
