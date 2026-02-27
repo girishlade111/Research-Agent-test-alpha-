@@ -7,7 +7,7 @@ import uuid
 from collections import defaultdict
 from datetime import datetime
 
-from app.models import Chunk, FileRecord, Project, RetrievalLog
+from app.models import Chunk, FileRecord, IngestionJob, Project, RetrievalLog
 
 
 class InMemoryStore:
@@ -15,6 +15,7 @@ class InMemoryStore:
         self.projects: dict[str, Project] = {}
         self.files: dict[str, FileRecord] = {}
         self.chunks: dict[str, Chunk] = {}
+        self.jobs: dict[str, IngestionJob] = {}
         self.project_chunks: dict[str, set[str]] = defaultdict(set)
         self.pinned_chunks: dict[str, set[str]] = defaultdict(set)
         self.logs: list[RetrievalLog] = []
@@ -24,14 +25,20 @@ class InMemoryStore:
 
     def create_project(self, owner_id: str, name: str) -> Project:
         pid = str(uuid.uuid4())
-        project = Project(id=pid, owner_id=owner_id, name=name, member_ids={owner_id})
+        project = Project(id=pid, owner_id=owner_id, name=name, members={owner_id: "owner"})
         self.projects[pid] = project
         return project
 
-    def ensure_project_access(self, user_id: str, project_id: str) -> None:
+    def share_project(self, project_id: str, target_user_id: str, role: str) -> None:
+        self.projects[project_id].members[target_user_id] = role
+
+    def ensure_project_access(self, user_id: str, project_id: str, required: str = "read") -> None:
         project = self.projects.get(project_id)
-        if not project or user_id not in project.member_ids:
+        if not project or user_id not in project.members:
             raise PermissionError("Project not accessible")
+        hierarchy = {"read": 1, "query": 2, "write": 3, "owner": 4}
+        if hierarchy[project.members[user_id]] < hierarchy[required]:
+            raise PermissionError("Insufficient role for operation")
 
     def upsert_file(self, record: FileRecord) -> None:
         self.files[record.id] = record
@@ -52,6 +59,11 @@ class InMemoryStore:
             self.pinned_chunks[file_record.project_id].discard(cid)
         if file_record.local_path and os.path.exists(file_record.local_path):
             os.remove(file_record.local_path)
+
+    def create_job(self, file_id: str, project_id: str) -> IngestionJob:
+        job = IngestionJob(id=str(uuid.uuid4()), file_id=file_id, project_id=project_id, status="queued")
+        self.jobs[job.id] = job
+        return job
 
     def log_retrieval(self, log: RetrievalLog) -> None:
         self.logs.append(log)

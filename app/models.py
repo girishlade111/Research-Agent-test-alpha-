@@ -10,7 +10,7 @@ class Project:
     id: str
     owner_id: str
     name: str
-    member_ids: set[str] = field(default_factory=set)
+    members: dict[str, str] = field(default_factory=dict)  # user_id -> role (owner/read/query/write)
 
 
 @dataclass
@@ -47,3 +47,15 @@ class RetrievalLog:
     query: str
     retrieved_chunk_ids: list[str]
     timestamp: datetime
+    use_web: bool = False
+
+
+@dataclass
+class IngestionJob:
+    id: str
+    file_id: str
+    project_id: str
+    status: str
+    retries: int = 0
+    error: str | None = None
+    created_at: datetime = field(default_factory=datetime.utcnow)

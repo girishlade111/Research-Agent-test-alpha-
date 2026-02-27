@@ -1,10 +1,44 @@
 openapi: 3.1.0
 info:
   title: Deep Research API
-  version: 0.1.0
+  version: 0.2.0
 servers:
   - url: https://api.example.com
 paths:
+  /api/health:
+    get:
+      summary: Health check
+      responses:
+        '200': { description: Service is healthy }
+  /api/me/profiles:
+    get:
+      summary: Public social/contact profile links
+      responses:
+        '200': { description: Profiles returned }
+  /api/projects:
+    post:
+      summary: Create a project
+      parameters:
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Project created }
+  /api/project/{projectId}/share:
+    post:
+      summary: Share project with role permissions
+      parameters:
+        - in: path
+          name: projectId
+          required: true
+          schema: { type: string }
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Shared }
   /api/upload:
     post:
       summary: Upload file for a project
@@ -30,13 +64,6 @@ paths:
       responses:
         '200':
           description: Upload accepted
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  fileId: { type: string }
-                  parseStatus: { type: string }
   /api/files:
     get:
       summary: List files by project
@@ -50,8 +77,7 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '200':
-          description: File list
+        '200': { description: File list }
   /api/ingest/{fileId}:
     post:
       summary: Trigger parse/chunk/embed job
@@ -66,6 +92,20 @@ paths:
           schema: { type: string }
       responses:
         '200': { description: Ingestion completed }
+  /api/ingest/jobs/{jobId}:
+    get:
+      summary: Fetch ingestion job status
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Job status returned }
   /api/query:
     post:
       summary: Research query with retrieval
@@ -129,14 +169,6 @@ paths:
           name: x-user-id
           required: true
           schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                chunkId: { type: string }
       responses:
         '200': { description: Chunk pinned }
   /api/settings/provider:
@@ -149,6 +181,20 @@ paths:
           schema: { type: string }
       responses:
         '200': { description: Provider settings saved }
+  /api/audit/retrievals:
+    get:
+      summary: Owner audit log for retrieval activity
+      parameters:
+        - in: query
+          name: projectId
+          required: true
+          schema: { type: string }
+        - in: header
+          name: x-user-id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Audit records }
 components:
   schemas:
     QueryRequest:
