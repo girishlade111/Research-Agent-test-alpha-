@@ -1,18 +1,27 @@
 from __future__ import annotations
 
+import logging
 import os
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, Field, field_validator
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from app.answer_engine import compute_confidence, generate_answer, generate_followups
+from app.config import settings
 from app.embeddings import embed, refit
+from app.logging_config import get_logger, setup_logging
+from app.middleware import ErrorHandlingMiddleware, LoggingMiddleware, RequestIdMiddleware
 from app.models import FileRecord, RetrievalLog
 from app.pipeline import chunk_document, parse_content
+from app.rate_limiter import limiter, rate_limit_exceeded_handler
 from app.skills.comparator import compare_documents, find_contradictions
 from app.skills.conversation import ConversationManager, rewrite_query
 from app.skills.extractor import extract_entities, extract_key_facts, extract_topics
@@ -20,11 +29,36 @@ from app.skills.summarizer import extract_key_points, summarize_chunks, summariz
 from app.skills.web_search import WebSearchProvider, format_web_results
 from app.store import InMemoryStore, bm25_like_score, cosine_similarity
 
-app = FastAPI(title="Deep Research API", version="0.2.0")
+# Initialize structured logging
+setup_logging()
+api_logger = get_logger("app.api")
+
+app = FastAPI(title="Deep Research API", version="0.3.0")
+
+# Register rate limiter state
+app.state.limiter = limiter
+
+# Register rate limit exceeded handler
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Register custom middleware (order matters: outermost first)
+app.add_middleware(ErrorHandlingMiddleware)
+app.add_middleware(LoggingMiddleware)
+app.add_middleware(RequestIdMiddleware)
+
 store = InMemoryStore()
 conversation_manager = ConversationManager()
-MAX_FILE_SIZE = 25 * 1024 * 1024
-ALLOWED_EXTENSIONS = {".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx", ".xls", ".png", ".jpg", ".jpeg", ".heic"}
+MAX_FILE_SIZE = settings.MAX_FILE_SIZE
+ALLOWED_EXTENSIONS = settings.allowed_extensions_set
 
 SOCIALS = {
     "instagram": "https://www.instagram.com/girish_lade_/",
@@ -38,6 +72,17 @@ SOCIALS = {
 
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=2, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        """Validate project name does not contain dangerous characters."""
+        if not v.strip():
+            raise ValueError("Name cannot be empty or whitespace only")
+        # Allow alphanumeric, spaces, hyphens, underscores, and periods
+        if not re.match(r"^[\w\s\-\.]+$", v):
+            raise ValueError("Name contains invalid characters")
+        return v.strip()
 
 
 class ShareProjectRequest(BaseModel):
@@ -59,6 +104,14 @@ class QueryRequest(BaseModel):
     useWeb: bool = False
     filters: QueryFilters = Field(default_factory=QueryFilters)
     conversationId: str | None = None
+
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, v: str) -> str:
+        """Validate that query is not just whitespace."""
+        if not v.strip():
+            raise ValueError("Query cannot be empty or whitespace only")
+        return v
 
 
 class PinRequest(BaseModel):
@@ -95,6 +148,33 @@ class ConversationStartRequest(BaseModel):
 class ConversationMessageRequest(BaseModel):
     conversationId: str
     message: str = Field(min_length=1, max_length=2000)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """Custom HTTPException handler that includes request_id."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "request_id": request_id,
+            "timestamp": datetime.now(UTC).isoformat() + "Z",
+            "error": "HTTPException",
+            "detail": exc.detail,
+        },
+    )
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    """Log service startup."""
+    api_logger.info("Deep Research API starting up (version 0.3.0)")
+
+
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    """Log service shutdown."""
+    api_logger.info("Deep Research API shutting down")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -165,7 +245,8 @@ def share_project(project_id: str, body: ShareProjectRequest, x_user_id: str = H
 
 
 @app.post("/api/upload")
-async def upload_file(projectId: str, file: UploadFile = File(...), x_user_id: str = Header(...)) -> dict[str, Any]:
+@limiter.limit(settings.RATE_LIMIT_UPLOAD)
+async def upload_file(request: Request, projectId: str, file: UploadFile = File(...), x_user_id: str = Header(...)) -> dict[str, Any]:
     try:
         store.ensure_project_access(x_user_id, projectId, required="write")
     except PermissionError as e:
@@ -201,7 +282,8 @@ async def upload_file(projectId: str, file: UploadFile = File(...), x_user_id: s
 
 
 @app.get("/api/files")
-def list_files(projectId: str, x_user_id: str = Header(...)) -> list[dict[str, Any]]:
+@limiter.limit(settings.RATE_LIMIT_READ)
+def list_files(request: Request, projectId: str, x_user_id: str = Header(...)) -> list[dict[str, Any]]:
     try:
         store.ensure_project_access(x_user_id, projectId)
     except PermissionError as e:
@@ -232,7 +314,8 @@ def ingest_status(job_id: str, x_user_id: str = Header(...)) -> dict[str, Any]:
 
 
 @app.post("/api/ingest/{file_id}")
-def ingest_file(file_id: str, x_user_id: str = Header(...)) -> dict[str, Any]:
+@limiter.limit(settings.RATE_LIMIT_UPLOAD)
+def ingest_file(request: Request, file_id: str, x_user_id: str = Header(...)) -> dict[str, Any]:
     file_record = store.files.get(file_id)
     if not file_record:
         raise HTTPException(status_code=404, detail="File not found")
@@ -287,7 +370,8 @@ def _dynamic_threshold(scores: list[float]) -> float:
 
 
 @app.post("/api/query")
-def query(body: QueryRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
+@limiter.limit(settings.RATE_LIMIT_QUERY)
+def query(request: Request, body: QueryRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
     if x_user_id != body.userId:
         raise HTTPException(status_code=403, detail="User mismatch")
     try:
@@ -416,7 +500,8 @@ def query(body: QueryRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
 
 
 @app.get("/api/files/{file_id}/preview")
-def preview_file(file_id: str, pageno: int = 1, offset: int = 0, x_user_id: str = Header(...)) -> dict[str, Any]:
+@limiter.limit(settings.RATE_LIMIT_READ)
+def preview_file(request: Request, file_id: str, pageno: int = 1, offset: int = 0, x_user_id: str = Header(...)) -> dict[str, Any]:
     record = store.files.get(file_id)
     if not record:
         raise HTTPException(status_code=404, detail="File not found")
@@ -449,7 +534,8 @@ def set_provider(body: ProviderRequest, x_user_id: str = Header(...)) -> dict[st
 
 
 @app.get("/api/audit/retrievals")
-def audit_retrievals(projectId: str = Query(...), x_user_id: str = Header(...)) -> list[dict[str, Any]]:
+@limiter.limit(settings.RATE_LIMIT_READ)
+def audit_retrievals(request: Request, projectId: str = Query(...), x_user_id: str = Header(...)) -> list[dict[str, Any]]:
     try:
         store.ensure_project_access(x_user_id, projectId, required="owner")
     except PermissionError as e:
