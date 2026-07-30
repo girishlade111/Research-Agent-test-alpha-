@@ -1,0 +1,24 @@
+{
+  "project_type": "Python FastAPI backend - Deep Research Agent with RAG over private project files",
+  "language": "Python 3.12",
+  "build_system": "pip with pyproject.toml, editable install with pip install -e '.[dev]'",
+  "test_framework": "pytest with httpx TestClient for API tests",
+  "build_command": "python3.12 -m pip install -e '.[dev]'",
+  "test_command": "python3.12 -m pytest tests/ -v",
+  "verification_instructions": "1. Run python3.12 -m pip install -e '.[dev]' to install. 2. Run python3.12 -m pytest tests/ -v to run all tests. 3. Start server with python3.12 -m uvicorn app.main:app --port 8000 and test endpoints manually if needed.",
+  "snapshot_or_generated_files": null,
+  "setup_instructions": "python3.12 -m pip install -e '.[dev]'",
+  "environment_constraints": "Python 3.12 available at /usr/bin/python3.12. Default python3 is 3.9 so always use python3.12 explicitly. Network access available for pip installs. No Docker daemon available.",
+  "contribution_requirements": "No CONTRIBUTING.md. Follow existing code patterns: dataclasses for models, FastAPI for endpoints, in-memory store pattern.",
+  "key_patterns": "Models use @dataclass in app/models.py. Store is InMemoryStore class in app/store.py. Pipeline handles parse/chunk/embed in app/pipeline.py. Main FastAPI app in app/main.py. Tests use direct store instantiation and httpx for API-level tests.",
+  "relevant_files": [
+    "app/main.py",
+    "app/models.py",
+    "app/pipeline.py",
+    "app/store.py",
+    "tests/test_e2e.py",
+    "pyproject.toml",
+    "openapi.yaml"
+  ],
+  "directory_structure": "app/ - main application (main.py, models.py, pipeline.py, store.py). tests/ - test files. docs/ - architecture.md, wireframes.md. Root: pyproject.toml, openapi.yaml, README.md"
+}

@@ -2,7 +2,7 @@
   "id": "FEAT-002",
   "type": "feat",
   "description": "Add agent skills/capabilities: document summarization, multi-document comparison, entity/key-fact extraction, multi-turn conversation with context, and web search integration. Each skill is an API endpoint backed by real logic operating on the indexed corpus.",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "Create app/skills/__init__.py to make it a package.",
     "Create app/skills/summarizer.py - Implement extractive summarization: (1) summarize_document(text, max_sentences=10) - Uses TextRank-like algorithm (sentence similarity graph, pick top sentences by centrality). (2) summarize_chunks(chunks, query=None, max_sentences=5) - Summarizes retrieved chunks with optional query focus (boost sentences containing query terms).",
@@ -28,5 +28,5 @@
     "python3.12 -m pytest tests/ -v"
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "All 21 tests pass (3 existing + 18 new). requests library added for web search. conversation_manager is a module-level singleton in app/main.py alongside store. TestClient from starlette used for endpoint tests. Skills work with pure Python logic, no external API keys needed."
 }
