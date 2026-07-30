@@ -2,7 +2,7 @@
   "id": "FEAT-001",
   "type": "fix",
   "description": "Fix bugs and implement a real working RAG pipeline with proper embeddings, improved chunking, and actual answer generation logic. Replace the hash-based placeholder embedding with TF-IDF vectorization that works without external API keys. Implement proper answer synthesis from retrieved chunks.",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "Update pyproject.toml to add dependencies: scikit-learn (for TF-IDF vectorization), numpy. Keep requires-python as >=3.11.",
     "Create app/embeddings.py - Implement a TF-IDF based embedding system: (1) A VectorizerStore singleton that maintains a TfidfVectorizer fitted on all indexed documents. (2) An embed() function that converts text to a dense vector using TF-IDF with SVD dimensionality reduction (128 dims). (3) A refit() function called after new chunks are added to update the vectorizer. (4) Fallback: if only one document exists, use the existing hash-based approach until enough corpus is available.",
@@ -27,5 +27,5 @@
     "python3.12 -m pytest tests/ -v"
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "Added python-multipart dependency (required by FastAPI for file uploads but was missing from original pyproject.toml). Added app/__init__.py and setuptools package discovery config to fix editable install. The TF-IDF embedding system correctly produces higher cosine similarity for semantically related queries vs unrelated ones. All 3 original tests pass with updated imports."
 }
