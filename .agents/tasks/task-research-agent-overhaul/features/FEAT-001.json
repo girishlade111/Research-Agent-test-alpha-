@@ -1,0 +1,31 @@
+{
+  "id": "FEAT-001",
+  "type": "fix",
+  "description": "Fix bugs and implement a real working RAG pipeline with proper embeddings, improved chunking, and actual answer generation logic. Replace the hash-based placeholder embedding with TF-IDF vectorization that works without external API keys. Implement proper answer synthesis from retrieved chunks.",
+  "status": "completed",
+  "steps": [
+    "Update pyproject.toml to add dependencies: scikit-learn (for TF-IDF vectorization), numpy. Keep requires-python as >=3.11.",
+    "Create app/embeddings.py - Implement a TF-IDF based embedding system: (1) A VectorizerStore singleton that maintains a TfidfVectorizer fitted on all indexed documents. (2) An embed() function that converts text to a dense vector using TF-IDF with SVD dimensionality reduction (128 dims). (3) A refit() function called after new chunks are added to update the vectorizer. (4) Fallback: if only one document exists, use the existing hash-based approach until enough corpus is available.",
+    "Update app/pipeline.py - (1) Improve chunk_document() to use overlapping sliding window chunking (chunk_size=512 chars, overlap=100 chars) instead of just splitting on double newlines. Keep paragraph tracking. (2) Remove the old hash-based embed() function. (3) Improve parse_content() to handle edge cases better (empty files, binary files that slip through).",
+    "Create app/answer_engine.py - Implement answer synthesis: (1) A generate_answer(query, chunks, max_chunks=5) function that constructs a well-formatted answer from retrieved chunks using extractive summarization (select most relevant sentences from chunks). (2) A generate_followups(query, chunks) function that suggests follow-up questions based on what was found. (3) A compute_confidence(scores) function that returns a meaningful confidence score based on retrieval score distribution.",
+    "Update app/store.py - (1) Add a method reindex_embeddings(project_id) that re-embeds all chunks for a project when the vectorizer is refitted. (2) Fix the ensure_project_access method to handle missing project gracefully with proper HTTP-friendly errors.",
+    "Update app/main.py query endpoint - (1) Replace the simple snippet concatenation with the new answer_engine.generate_answer(). (2) Use the new embedding system for query embedding. (3) Use generate_followups() for follow-up suggestions. (4) Use compute_confidence() for confidence scores. (5) Fix the scoring threshold - currently 0.08 is arbitrary, use dynamic threshold based on score distribution (e.g., mean - 1 std dev of top scores).",
+    "Update app/main.py ingest endpoint - After adding chunks, call refit on the embedding system and reindex existing chunks so TF-IDF stays current.",
+    "Fix bug: In main.py upload_file(), the PermissionError from ensure_project_access should be caught properly (currently it raises generic PermissionError but the endpoint catches it correctly - verify this works end-to-end).",
+    "Fix deprecation: Replace all datetime.utcnow() calls with datetime.now(datetime.UTC) throughout the codebase (models.py, main.py, store.py)."
+  ],
+  "acceptance_criteria": [
+    "python3.12 -m pip install -e '.[dev]' succeeds with new dependencies",
+    "The embed() function produces meaningful vectors where semantically similar texts have higher cosine similarity than unrelated texts",
+    "The query endpoint returns synthesized answers (not just concatenated snippets) when chunks are available",
+    "Chunking uses overlapping windows so no information is lost at boundaries",
+    "All existing tests still pass (may need updates to work with new embedding approach)",
+    "No datetime.utcnow() deprecation warnings"
+  ],
+  "verification": [
+    "python3.12 -m pip install -e '.[dev]'",
+    "python3.12 -m pytest tests/ -v"
+  ],
+  "blocked_reason": null,
+  "findings": "Added python-multipart dependency (required by FastAPI for file uploads but was missing from original pyproject.toml). Added app/__init__.py and setuptools package discovery config to fix editable install. The TF-IDF embedding system correctly produces higher cosine similarity for semantically related queries vs unrelated ones. All 3 original tests pass with updated imports."
+}

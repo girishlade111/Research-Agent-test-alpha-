@@ -1,0 +1,29 @@
+{
+  "id": "FEAT-003",
+  "type": "feat",
+  "description": "Add proper error handling middleware, structured logging, rate limiting, request validation, and CORS support. Make the application production-ready with proper observability.",
+  "status": "completed",
+  "steps": [
+    "Update pyproject.toml to add dependency: slowapi (for rate limiting based on starlette/fastapi).",
+    "Create app/middleware.py - Implement: (1) ErrorHandlingMiddleware - catches unhandled exceptions, returns structured JSON error responses with request_id, timestamp, error type, message. Logs full traceback. (2) RequestIdMiddleware - generates a UUID request_id for each request, adds to response headers. (3) LoggingMiddleware - logs each request with method, path, status_code, duration_ms, user_id (from header if present).",
+    "Create app/logging_config.py - Set up structured JSON logging: (1) Configure Python logging with JSON formatter. (2) Log format includes: timestamp, level, message, request_id, user_id, extra context. (3) Separate loggers for 'app.api', 'app.pipeline', 'app.store'.",
+    "Create app/rate_limiter.py - Implement rate limiting: (1) Use slowapi with in-memory backend. (2) Configure limits: 100 requests/minute for query endpoints, 20 requests/minute for upload, 200 requests/minute for read endpoints. (3) Custom key function that uses x-user-id header.",
+    "Update app/main.py - (1) Add CORS middleware (allow configurable origins, default to ['*'] for dev). (2) Register error handling middleware. (3) Register request ID middleware. (4) Register logging middleware. (5) Add rate limiting to upload, query, ingest endpoints. (6) Add a global exception handler for HTTPException that includes request_id. (7) Add startup/shutdown event handlers that log service state.",
+    "Add input validation improvements: (1) In QueryRequest, validate that query is not just whitespace. (2) In ProjectCreate, validate name doesn't contain dangerous characters. (3) Add max length validation on all string inputs to prevent abuse.",
+    "Create app/config.py - Centralize configuration: (1) Use pydantic BaseSettings to load from environment variables with defaults. (2) Settings: MAX_FILE_SIZE, ALLOWED_EXTENSIONS, RATE_LIMIT_QUERY, RATE_LIMIT_UPLOAD, CORS_ORIGINS, LOG_LEVEL, DATA_DIR. (3) Replace hardcoded values in main.py with config references."
+  ],
+  "acceptance_criteria": [
+    "All API errors return structured JSON with request_id, timestamp, error, detail fields",
+    "Each response includes X-Request-ID header",
+    "Rate limiting returns 429 when exceeded with Retry-After header",
+    "CORS headers are present on responses",
+    "Application configuration is loaded from environment variables with sensible defaults",
+    "Structured logs are emitted for each request",
+    "All existing tests still pass"
+  ],
+  "verification": [
+    "python3.12 -m pytest tests/ -v"
+  ],
+  "blocked_reason": null,
+  "findings": "All 21 tests pass. Rate limiting disabled in test environment via APP_ENVIRONMENT=test env var (set in tests/conftest.py). CORS defaults to allow all origins. Structured JSON logging emits to stdout. on_event startup/shutdown handlers produce deprecation warnings but work correctly. Custom HTTPException handler returns structured JSON with request_id for all error responses. slowapi uses in-memory storage for rate limit state."
+}
