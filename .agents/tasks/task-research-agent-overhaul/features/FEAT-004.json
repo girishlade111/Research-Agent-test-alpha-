@@ -1,0 +1,32 @@
+{
+  "id": "FEAT-004",
+  "type": "feat",
+  "description": "Comprehensive test suite covering all API endpoints, skills, pipeline logic, and error cases using httpx TestClient and pytest fixtures. Ensure every feature added in FEAT-001 through FEAT-003 has proper test coverage.",
+  "status": "in_progress",
+  "steps": [
+    "Create tests/conftest.py - Shared pytest fixtures: (1) app_client fixture using httpx.AsyncClient with ASGITransport for the FastAPI app. (2) sample_project fixture that creates a project and returns project_id + user_id. (3) ingested_project fixture that creates a project, uploads a sample text file, and ingests it. (4) multi_doc_project fixture that ingests 2-3 different documents for comparison/multi-doc tests. (5) tmp data directory cleanup fixture.",
+    "Create tests/test_api_projects.py - Test project CRUD: (1) test_create_project_success. (2) test_create_project_missing_header returns 422. (3) test_create_project_short_name returns 422. (4) test_share_project_success. (5) test_share_project_not_owner returns 403. (6) test_share_project_not_found returns 404.",
+    "Create tests/test_api_upload_ingest.py - Test upload and ingestion: (1) test_upload_file_success returns fileId and jobId. (2) test_upload_unsupported_type returns 400. (3) test_upload_no_access returns 403. (4) test_ingest_file_success creates chunks. (5) test_ingest_file_not_found returns 404. (6) test_ingest_job_status. (7) test_upload_large_file returns 413.",
+    "Create tests/test_api_query.py - Test query/retrieval: (1) test_query_with_results returns answer and sources. (2) test_query_no_results returns 'I don't know' style answer. (3) test_query_with_file_filter. (4) test_query_user_mismatch returns 403. (5) test_query_no_access returns 403. (6) test_query_with_web_enabled. (7) test_query_with_conversation_context.",
+    "Create tests/test_api_skills.py - Test skill endpoints: (1) test_summarize_success. (2) test_summarize_no_files returns meaningful error. (3) test_compare_two_documents. (4) test_compare_needs_two_files. (5) test_extract_entities. (6) test_extract_facts. (7) test_extract_topics. (8) test_conversation_start. (9) test_conversation_message. (10) test_conversation_history.",
+    "Create tests/test_pipeline.py - Test pipeline internals: (1) test_chunk_document_overlap (verify overlapping chunks). (2) test_parse_content_text. (3) test_parse_content_csv. (4) test_parse_content_empty_file. (5) test_embed_similar_texts_score_higher (semantic similarity test). (6) test_embed_different_texts_score_lower.",
+    "Create tests/test_middleware.py - Test middleware: (1) test_request_id_header_present. (2) test_error_response_structured. (3) test_cors_headers_present. (4) test_rate_limiting (if feasible without real timing).",
+    "Create tests/test_skills_unit.py - Unit tests for skill modules: (1) test_summarizer_extracts_top_sentences. (2) test_comparator_finds_shared_themes. (3) test_extractor_finds_dates_and_values. (4) test_extractor_finds_emails_urls. (5) test_conversation_query_rewrite. (6) test_web_search_format_results.",
+    "Update tests/test_e2e.py - Fix deprecation warnings by updating datetime.utcnow() to datetime.now(datetime.UTC). Ensure existing tests still pass with the new architecture."
+  ],
+  "acceptance_criteria": [
+    "python3.12 -m pytest tests/ -v shows all tests passing",
+    "At least 40 test cases across all test files",
+    "Every API endpoint has at least one success and one error test case",
+    "Every skill module has unit tests verifying core logic",
+    "Pipeline embedding quality is tested (similar texts score higher than dissimilar)",
+    "Tests use httpx TestClient with proper async handling for API tests",
+    "No test relies on external network calls (web search tests mock the HTTP calls)"
+  ],
+  "verification": [
+    "python3.12 -m pytest tests/ -v",
+    "python3.12 -m pytest tests/ --tb=short 2>&1 | tail -5"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}
