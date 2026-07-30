@@ -1,0 +1,32 @@
+{
+  "id": "FEAT-002",
+  "type": "feat",
+  "description": "Add agent skills/capabilities: document summarization, multi-document comparison, entity/key-fact extraction, multi-turn conversation with context, and web search integration. Each skill is an API endpoint backed by real logic operating on the indexed corpus.",
+  "status": "in_progress",
+  "steps": [
+    "Create app/skills/__init__.py to make it a package.",
+    "Create app/skills/summarizer.py - Implement extractive summarization: (1) summarize_document(text, max_sentences=10) - Uses TextRank-like algorithm (sentence similarity graph, pick top sentences by centrality). (2) summarize_chunks(chunks, query=None, max_sentences=5) - Summarizes retrieved chunks with optional query focus (boost sentences containing query terms).",
+    "Create app/skills/comparator.py - Implement document comparison: (1) compare_documents(doc_texts: list[tuple[str, str]], aspects=None) - Takes list of (filename, text) pairs and returns structured comparison. Identifies shared themes, unique points per document, contradictions. Uses TF-IDF to find key terms per doc, then compares overlap. (2) find_contradictions(chunks_a, chunks_b) - Identifies potentially contradicting statements using keyword opposition patterns.",
+    "Create app/skills/extractor.py - Implement entity and key fact extraction: (1) extract_entities(text) - Uses regex patterns and heuristics to find: dates, monetary values, percentages, proper nouns (capitalized sequences), emails, URLs, organizations (common suffixes like Inc, Corp, Ltd). (2) extract_key_facts(text, top_n=10) - Identifies key factual statements (sentences with numbers, proper nouns, or definitive verbs). (3) extract_topics(chunks) - Uses TF-IDF to identify top topic keywords across chunks.",
+    "Create app/skills/web_search.py - Implement web search integration: (1) A WebSearchProvider class with search(query, num_results=5) method. (2) Default implementation uses DuckDuckGo HTML search (requests to html.duckduckgo.com/html/ with parsing of results - no API key needed). (3) A format_web_results(results) function that formats results for inclusion in answer context. (4) Proper timeout handling and error recovery.",
+    "Create app/skills/conversation.py - Implement multi-turn conversation: (1) A ConversationManager class that stores conversation history per user+project. (2) Methods: start_conversation(user_id, project_id), add_turn(conv_id, role, content), get_context(conv_id, max_turns=10). (3) Query rewriting: rewrite_query(original_query, conversation_history) - expands pronouns and references using conversation context (simple rule-based: if query contains 'it', 'this', 'that', 'they' etc., prepend key nouns from previous turn).",
+    "Add new API endpoints in app/main.py: (1) POST /api/summarize - accepts projectId, fileIds (optional, defaults to all), maxSentences. Returns summary text and key points. (2) POST /api/compare - accepts projectId, fileIds (2+ required). Returns comparison structure. (3) POST /api/extract - accepts projectId, fileIds (optional), extractionType ('entities'|'facts'|'topics'). Returns extracted items. (4) POST /api/conversation/start - accepts projectId. Returns conversationId. (5) POST /api/conversation/message - accepts conversationId, message. Performs retrieval with conversation context, returns answer. (6) GET /api/conversation/{conversationId}/history - returns conversation turns.",
+    "Update the query endpoint to optionally use conversation context when a conversationId is provided in the request body. Add optional 'conversationId' field to QueryRequest model.",
+    "Update the query endpoint to actually perform web search when useWeb=true and allowWeb setting is enabled - use the web_search skill to fetch real results and include them in sources."
+  ],
+  "acceptance_criteria": [
+    "POST /api/summarize returns a coherent extractive summary of indexed documents",
+    "POST /api/compare returns structured comparison identifying shared and unique themes across 2+ documents",
+    "POST /api/extract returns entities (dates, values, names) and key facts from documents",
+    "POST /api/conversation/start creates a conversation and returns an ID",
+    "POST /api/conversation/message accepts a message and returns an answer with conversation context",
+    "Web search integration returns real results from DuckDuckGo when useWeb=true",
+    "All new endpoints require x-user-id header and enforce project access permissions",
+    "All new endpoints return proper error responses for invalid inputs"
+  ],
+  "verification": [
+    "python3.12 -m pytest tests/ -v"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

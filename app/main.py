@@ -13,10 +13,16 @@ from app.answer_engine import compute_confidence, generate_answer, generate_foll
 from app.embeddings import embed, refit
 from app.models import FileRecord, RetrievalLog
 from app.pipeline import chunk_document, parse_content
+from app.skills.comparator import compare_documents, find_contradictions
+from app.skills.conversation import ConversationManager, rewrite_query
+from app.skills.extractor import extract_entities, extract_key_facts, extract_topics
+from app.skills.summarizer import extract_key_points, summarize_chunks, summarize_document
+from app.skills.web_search import WebSearchProvider, format_web_results
 from app.store import InMemoryStore, bm25_like_score, cosine_similarity
 
 app = FastAPI(title="Deep Research API", version="0.2.0")
 store = InMemoryStore()
+conversation_manager = ConversationManager()
 MAX_FILE_SIZE = 25 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx", ".xls", ".png", ".jpg", ".jpeg", ".heic"}
 
@@ -52,6 +58,7 @@ class QueryRequest(BaseModel):
     topK: int = Field(default=10, ge=1, le=50)
     useWeb: bool = False
     filters: QueryFilters = Field(default_factory=QueryFilters)
+    conversationId: str | None = None
 
 
 class PinRequest(BaseModel):
@@ -62,6 +69,32 @@ class ProviderRequest(BaseModel):
     llmProvider: str
     embeddingProvider: str
     allowWeb: bool = False
+
+
+class SummarizeRequest(BaseModel):
+    projectId: str
+    fileIds: list[str] = Field(default_factory=list)
+    maxSentences: int = Field(default=10, ge=1, le=50)
+
+
+class CompareRequest(BaseModel):
+    projectId: str
+    fileIds: list[str] = Field(min_length=2)
+
+
+class ExtractRequest(BaseModel):
+    projectId: str
+    fileIds: list[str] = Field(default_factory=list)
+    extractionType: Literal["entities", "facts", "topics"]
+
+
+class ConversationStartRequest(BaseModel):
+    projectId: str
+
+
+class ConversationMessageRequest(BaseModel):
+    conversationId: str
+    message: str = Field(min_length=1, max_length=2000)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -262,7 +295,15 @@ def query(body: QueryRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e)) from e
 
-    query_emb = embed(body.query)
+    # Optionally rewrite query using conversation context
+    effective_query = body.query
+    if body.conversationId:
+        conv = conversation_manager.get_conversation(body.conversationId)
+        if conv and conv.project_id == body.projectId:
+            history = conversation_manager.get_context(body.conversationId, max_turns=6)
+            effective_query = rewrite_query(body.query, history)
+
+    query_emb = embed(effective_query)
     candidate_ids = list(store.project_chunks[body.projectId])
     pinned = store.pinned_chunks[body.projectId]
 
@@ -282,7 +323,7 @@ def query(body: QueryRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
             if not (start <= ts <= end):
                 continue
         dense = cosine_similarity(query_emb, c.embedding)
-        sparse = bm25_like_score(body.query, c.text)
+        sparse = bm25_like_score(effective_query, c.text)
         pin_boost = 0.1 if cid in pinned else 0.0
         score = 0.7 * dense + 0.3 * sparse + pin_boost
         all_scores.append(score)
@@ -318,28 +359,39 @@ def query(body: QueryRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
         answer = "I don't have enough information in the indexed corpus to answer this question."
         caveat = "No retrieved chunks passed the citation threshold."
     else:
-        answer = generate_answer(body.query, top)
+        answer = generate_answer(effective_query, top)
         caveat = "Derived from local corpus retrieval with extractive summarization."
 
     # Generate follow-up suggestions
-    followups = generate_followups(body.query, top)
+    followups = generate_followups(effective_query, top)
 
     # Compute confidence from score distribution
     top_scores = [s for s, _ in top]
     confidence = compute_confidence(top_scores)
 
+    # Web search integration - use real DuckDuckGo search when enabled
     if body.useWeb and store.settings.get(body.userId, {}).get("allowWeb", False):
-        sources.append(
-            {
-                "id": "web-1",
-                "fileId": None,
-                "filename": "web",
-                "page": None,
-                "snippet": "External web augmentation is enabled; connect production search provider.",
-                "score": 0.5,
-                "url": "https://example.com/search-placeholder",
-            }
-        )
+        try:
+            web_provider = WebSearchProvider(timeout=8)
+            web_results = web_provider.search(effective_query, num_results=5)
+            for j, wr in enumerate(web_results):
+                sources.append(
+                    {
+                        "id": f"web-{j + 1}",
+                        "fileId": None,
+                        "filename": "web",
+                        "page": None,
+                        "snippet": f"{wr.title}: {wr.snippet}",
+                        "score": 0.5,
+                        "url": wr.url,
+                    }
+                )
+            if web_results:
+                formatted = format_web_results(web_results)
+                evidence_lines.append(f"[Web] {formatted[:300]}")
+        except Exception:
+            # Gracefully handle web search failures
+            pass
 
     store.log_retrieval(
         RetrievalLog(
@@ -426,3 +478,239 @@ def delete_file(file_id: str, x_user_id: str = Header(...)) -> dict[str, str]:
         raise HTTPException(status_code=403, detail=str(e)) from e
     store.remove_file(file_id)
     return {"status": "deleted", "fileId": file_id}
+
+
+# --------------- Skills endpoints ---------------
+
+
+def _get_project_file_texts(project_id: str, file_ids: list[str] | None = None) -> list[tuple[str, str]]:
+    """Helper to get (filename, text) for files in a project.
+
+    Args:
+        project_id: Project to load files from.
+        file_ids: Optional filter; if empty/None, all project files are used.
+
+    Returns:
+        List of (filename, full_text) tuples.
+    """
+    results: list[tuple[str, str]] = []
+    for f in store.files.values():
+        if f.project_id != project_id:
+            continue
+        if file_ids and f.id not in file_ids:
+            continue
+        if not f.parsed:
+            continue
+        text, _ = parse_content(f.local_path, f.mime_type)
+        results.append((f.filename, text))
+    return results
+
+
+def _get_project_chunk_texts(project_id: str, file_ids: list[str] | None = None) -> list[str]:
+    """Helper to get chunk texts for a project."""
+    texts: list[str] = []
+    for cid in store.project_chunks.get(project_id, set()):
+        chunk = store.chunks.get(cid)
+        if chunk is None:
+            continue
+        if file_ids and chunk.file_id not in file_ids:
+            continue
+        texts.append(chunk.text)
+    return texts
+
+
+@app.post("/api/summarize")
+def summarize(body: SummarizeRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
+    """Summarize documents in a project using extractive summarization."""
+    try:
+        store.ensure_project_access(x_user_id, body.projectId, required="query")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+
+    file_texts = _get_project_file_texts(body.projectId, body.fileIds or None)
+    if not file_texts:
+        # Fall back to chunks if no parseable files found
+        chunk_texts = _get_project_chunk_texts(body.projectId, body.fileIds or None)
+        if not chunk_texts:
+            raise HTTPException(status_code=404, detail="No indexed content found for this project")
+        summary = summarize_chunks(chunk_texts, max_sentences=body.maxSentences)
+        key_points = extract_key_points(" ".join(chunk_texts), max_points=5)
+    else:
+        combined_text = "\n\n".join(text for _, text in file_texts)
+        summary = summarize_document(combined_text, max_sentences=body.maxSentences)
+        key_points = extract_key_points(combined_text, max_points=5)
+
+    return {
+        "summary": summary,
+        "keyPoints": key_points,
+        "documentCount": len(file_texts) if file_texts else 0,
+        "maxSentences": body.maxSentences,
+    }
+
+
+@app.post("/api/compare")
+def compare(body: CompareRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
+    """Compare 2+ documents to find shared and unique themes."""
+    try:
+        store.ensure_project_access(x_user_id, body.projectId, required="query")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+
+    if len(body.fileIds) < 2:
+        raise HTTPException(status_code=400, detail="At least 2 file IDs are required for comparison")
+
+    file_texts = _get_project_file_texts(body.projectId, body.fileIds)
+    if len(file_texts) < 2:
+        # Try using chunks grouped by file
+        doc_texts: list[tuple[str, str]] = []
+        for fid in body.fileIds:
+            f = store.files.get(fid)
+            if not f or f.project_id != body.projectId:
+                continue
+            chunks = [
+                store.chunks[cid].text
+                for cid in store.project_chunks.get(body.projectId, set())
+                if store.chunks.get(cid) and store.chunks[cid].file_id == fid
+            ]
+            if chunks:
+                doc_texts.append((f.filename, " ".join(chunks)))
+        if len(doc_texts) < 2:
+            raise HTTPException(status_code=404, detail="Not enough parsed documents found for comparison")
+        file_texts = doc_texts
+
+    comparison = compare_documents(file_texts)
+
+    # Also find contradictions between first two documents
+    chunks_a = _get_project_chunk_texts(body.projectId, [body.fileIds[0]])
+    chunks_b = _get_project_chunk_texts(body.projectId, [body.fileIds[1]])
+    contradictions = find_contradictions(chunks_a, chunks_b)
+    comparison["contradictions"] = contradictions
+
+    return comparison
+
+
+@app.post("/api/extract")
+def extract(body: ExtractRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
+    """Extract entities, facts, or topics from project documents."""
+    try:
+        store.ensure_project_access(x_user_id, body.projectId, required="query")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+
+    file_ids = body.fileIds or None
+    chunk_texts = _get_project_chunk_texts(body.projectId, file_ids)
+
+    if not chunk_texts:
+        raise HTTPException(status_code=404, detail="No indexed content found for this project")
+
+    combined_text = " ".join(chunk_texts)
+
+    if body.extractionType == "entities":
+        result = extract_entities(combined_text)
+        return {"extractionType": "entities", "entities": result}
+    elif body.extractionType == "facts":
+        facts = extract_key_facts(combined_text, top_n=10)
+        return {"extractionType": "facts", "facts": facts}
+    elif body.extractionType == "topics":
+        topics = extract_topics(chunk_texts, top_n=10)
+        return {"extractionType": "topics", "topics": topics}
+    else:
+        raise HTTPException(status_code=400, detail="Invalid extractionType")
+
+
+@app.post("/api/conversation/start")
+def conversation_start(body: ConversationStartRequest, x_user_id: str = Header(...)) -> dict[str, str]:
+    """Start a new multi-turn conversation."""
+    try:
+        store.ensure_project_access(x_user_id, body.projectId, required="query")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+
+    conv_id = conversation_manager.start_conversation(x_user_id, body.projectId)
+    return {"conversationId": conv_id, "projectId": body.projectId}
+
+
+@app.post("/api/conversation/message")
+def conversation_message(body: ConversationMessageRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
+    """Send a message in a conversation and get an answer with context."""
+    conv = conversation_manager.get_conversation(body.conversationId)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conv.user_id != x_user_id:
+        raise HTTPException(status_code=403, detail="Not your conversation")
+
+    try:
+        store.ensure_project_access(x_user_id, conv.project_id, required="query")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+
+    # Add user message to history
+    conversation_manager.add_turn(body.conversationId, "user", body.message)
+
+    # Rewrite query using conversation context
+    history = conversation_manager.get_context(body.conversationId, max_turns=6)
+    effective_query = rewrite_query(body.message, history[:-1])  # exclude current message
+
+    # Perform retrieval
+    query_emb = embed(effective_query)
+    candidate_ids = list(store.project_chunks.get(conv.project_id, set()))
+
+    scored: list[tuple[float, Any]] = []
+    for cid in candidate_ids:
+        c = store.chunks[cid]
+        dense = cosine_similarity(query_emb, c.embedding)
+        sparse = bm25_like_score(effective_query, c.text)
+        score = 0.7 * dense + 0.3 * sparse
+        scored.append((score, c))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:5]
+
+    # Generate answer
+    if top:
+        answer = generate_answer(effective_query, top)
+    else:
+        answer = "I don't have enough information in the indexed corpus to answer this question."
+
+    # Add assistant response to history
+    conversation_manager.add_turn(body.conversationId, "assistant", answer)
+
+    sources = []
+    for score, c in top:
+        f = store.files.get(c.file_id)
+        sources.append({
+            "id": c.id,
+            "fileId": c.file_id,
+            "filename": f.filename if f else "unknown",
+            "snippet": c.text[:200],
+            "score": round(score, 4),
+        })
+
+    return {
+        "conversationId": body.conversationId,
+        "answer": answer,
+        "sources": sources,
+        "rewrittenQuery": effective_query if effective_query != body.message else None,
+    }
+
+
+@app.get("/api/conversation/{conversation_id}/history")
+def conversation_history(conversation_id: str, x_user_id: str = Header(...)) -> dict[str, Any]:
+    """Get conversation history."""
+    conv = conversation_manager.get_conversation(conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conv.user_id != x_user_id:
+        raise HTTPException(status_code=403, detail="Not your conversation")
+
+    try:
+        store.ensure_project_access(x_user_id, conv.project_id, required="query")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+
+    history = conversation_manager.get_history(conversation_id)
+    return {
+        "conversationId": conversation_id,
+        "projectId": conv.project_id,
+        "turns": history,
+    }
