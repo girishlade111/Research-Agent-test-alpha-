@@ -5,7 +5,7 @@ import os
 import shutil
 import uuid
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.models import Chunk, FileRecord, IngestionJob, Project, RetrievalLog
 
@@ -33,12 +33,22 @@ class InMemoryStore:
         self.projects[project_id].members[target_user_id] = role
 
     def ensure_project_access(self, user_id: str, project_id: str, required: str = "read") -> None:
+        """Check user has required access level to a project.
+
+        Raises PermissionError with a descriptive message if access is denied.
+        Handles missing projects and users gracefully.
+        """
         project = self.projects.get(project_id)
-        if not project or user_id not in project.members:
-            raise PermissionError("Project not accessible")
+        if project is None:
+            raise PermissionError(f"Project '{project_id}' not found")
+        if user_id not in project.members:
+            raise PermissionError("User does not have access to this project")
         hierarchy = {"read": 1, "query": 2, "write": 3, "owner": 4}
-        if hierarchy[project.members[user_id]] < hierarchy[required]:
-            raise PermissionError("Insufficient role for operation")
+        user_role = project.members[user_id]
+        if hierarchy.get(user_role, 0) < hierarchy.get(required, 0):
+            raise PermissionError(
+                f"Insufficient role: user has '{user_role}' but '{required}' is required"
+            )
 
     def upsert_file(self, record: FileRecord) -> None:
         self.files[record.id] = record
@@ -52,7 +62,11 @@ class InMemoryStore:
         file_record = self.files.pop(file_id, None)
         if not file_record:
             return
-        doomed = [cid for cid in self.project_chunks[file_record.project_id] if self.chunks[cid].file_id == file_id]
+        doomed = [
+            cid
+            for cid in self.project_chunks[file_record.project_id]
+            if self.chunks[cid].file_id == file_id
+        ]
         for cid in doomed:
             self.project_chunks[file_record.project_id].discard(cid)
             self.chunks.pop(cid, None)
@@ -61,12 +75,40 @@ class InMemoryStore:
             os.remove(file_record.local_path)
 
     def create_job(self, file_id: str, project_id: str) -> IngestionJob:
-        job = IngestionJob(id=str(uuid.uuid4()), file_id=file_id, project_id=project_id, status="queued")
+        job = IngestionJob(
+            id=str(uuid.uuid4()),
+            file_id=file_id,
+            project_id=project_id,
+            status="queued",
+        )
         self.jobs[job.id] = job
         return job
 
     def log_retrieval(self, log: RetrievalLog) -> None:
         self.logs.append(log)
+
+    def reindex_embeddings(self, project_id: str) -> None:
+        """Re-embed all chunks for a project using the current vectorizer state.
+
+        Called after the TF-IDF vectorizer is refitted so that all existing
+        chunks get embeddings consistent with the updated vocabulary.
+        """
+        from app.embeddings import embed
+
+        chunk_ids = list(self.project_chunks.get(project_id, set()))
+        for cid in chunk_ids:
+            chunk = self.chunks.get(cid)
+            if chunk is not None:
+                chunk.embedding = embed(chunk.text)
+
+    def get_all_chunk_texts(self, project_id: str) -> list[str]:
+        """Get all chunk texts for a project (used for refitting the vectorizer)."""
+        texts: list[str] = []
+        for cid in self.project_chunks.get(project_id, set()):
+            chunk = self.chunks.get(cid)
+            if chunk is not None:
+                texts.append(chunk.text)
+        return texts
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -94,4 +136,4 @@ def reset_data_dir(path: str = "data") -> None:
 
 
 def now_iso() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")

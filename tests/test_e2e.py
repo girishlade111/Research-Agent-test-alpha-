@@ -1,12 +1,15 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
+from app.embeddings import embed, get_vectorizer_store
 from app.models import FileRecord
-from app.pipeline import chunk_document, embed
+from app.pipeline import chunk_document
 from app.store import InMemoryStore, bm25_like_score, cosine_similarity, reset_data_dir
 
 
 def setup_function() -> None:
     reset_data_dir()
+    # Reset the embedding singleton between tests
+    get_vectorizer_store().reset()
 
 
 def test_ingestion_retrieval_and_citation_mapping() -> None:
@@ -20,7 +23,7 @@ def test_ingestion_retrieval_and_citation_mapping() -> None:
         filename="report.txt",
         size=100,
         mime_type="text/plain",
-        upload_timestamp=datetime.utcnow(),
+        upload_timestamp=datetime.now(UTC),
     )
     store.upsert_file(file_record)
 
@@ -52,7 +55,7 @@ def test_delete_file_removes_chunks() -> None:
         filename="tiny.txt",
         size=10,
         mime_type="text/plain",
-        upload_timestamp=datetime.utcnow(),
+        upload_timestamp=datetime.now(UTC),
         local_path="",
     )
     store.upsert_file(f)

@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from app.answer_engine import compute_confidence, generate_answer, generate_followups
+from app.embeddings import embed, refit
 from app.models import FileRecord, RetrievalLog
-from app.pipeline import chunk_document, embed, parse_content
+from app.pipeline import chunk_document, parse_content
 from app.store import InMemoryStore, bm25_like_score, cosine_similarity
 
 app = FastAPI(title="Deep Research API", version="0.2.0")
@@ -156,7 +158,7 @@ async def upload_file(projectId: str, file: UploadFile = File(...), x_user_id: s
         filename=file.filename,
         size=len(content),
         mime_type=file.content_type or "application/octet-stream",
-        upload_timestamp=datetime.utcnow(),
+        upload_timestamp=datetime.now(UTC),
         parsed=False,
         local_path=local_path,
     )
@@ -189,7 +191,10 @@ def ingest_status(job_id: str, x_user_id: str = Header(...)) -> dict[str, Any]:
     job = store.jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    store.ensure_project_access(x_user_id, job.project_id)
+    try:
+        store.ensure_project_access(x_user_id, job.project_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
     return job.__dict__
 
 
@@ -211,6 +216,12 @@ def ingest_file(file_id: str, x_user_id: str = Header(...)) -> dict[str, Any]:
         text, details = parse_content(file_record.local_path, file_record.mime_type)
         chunks = chunk_document(file_record.id, file_record.filename, file_record.upload_timestamp, text)
         store.add_chunks(file_record.project_id, chunks)
+
+        # Refit the embedding system and reindex all chunks
+        all_texts = store.get_all_chunk_texts(file_record.project_id)
+        refit(all_texts)
+        store.reindex_embeddings(file_record.project_id)
+
         file_record.parsed = True
         file_record.parse_details = details | {"chunkCount": len(chunks)}
         current_job.status = "completed"
@@ -220,6 +231,26 @@ def ingest_file(file_id: str, x_user_id: str = Header(...)) -> dict[str, Any]:
         current_job.error = str(err)
         current_job.retries += 1
         raise HTTPException(status_code=500, detail="Ingestion failed") from err
+
+
+def _dynamic_threshold(scores: list[float]) -> float:
+    """Compute a dynamic score threshold based on score distribution.
+
+    Uses mean - 1 standard deviation of top scores as the threshold,
+    with a minimum of 0.01 to avoid filtering nothing.
+    """
+    if not scores:
+        return 0.01
+    if len(scores) == 1:
+        return scores[0] * 0.5
+
+    mean = sum(scores) / len(scores)
+    variance = sum((s - mean) ** 2 for s in scores) / len(scores)
+    std_dev = variance**0.5
+    threshold = mean - std_dev
+
+    # Floor at 0.01, ceiling at mean
+    return max(0.01, min(threshold, mean))
 
 
 @app.post("/api/query")
@@ -236,6 +267,8 @@ def query(body: QueryRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
     pinned = store.pinned_chunks[body.projectId]
 
     scored: list[tuple[float, Any]] = []
+    all_scores: list[float] = []
+
     for cid in candidate_ids:
         c = store.chunks[cid]
         fr = store.files[c.file_id]
@@ -252,9 +285,12 @@ def query(body: QueryRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
         sparse = bm25_like_score(body.query, c.text)
         pin_boost = 0.1 if cid in pinned else 0.0
         score = 0.7 * dense + 0.3 * sparse + pin_boost
-        if score >= 0.08:
-            scored.append((score, c))
+        all_scores.append(score)
+        scored.append((score, c))
 
+    # Apply dynamic threshold instead of fixed 0.08
+    threshold = _dynamic_threshold(all_scores)
+    scored = [(s, c) for s, c in scored if s >= threshold]
     scored.sort(key=lambda x: x[0], reverse=True)
     top = scored[: body.topK]
 
@@ -275,14 +311,22 @@ def query(body: QueryRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
             "score": round(score, 4),
         }
         sources.append(src)
-        evidence_lines.append(f"[{i}] {f.filename} p.{c.page} ¶{c.paragraph_index}: {snippet}")
+        evidence_lines.append(f"[{i}] {f.filename} p.{c.page} para.{c.paragraph_index}: {snippet}")
 
+    # Use answer engine for synthesis
     if not sources:
-        answer = "I don't know based on the currently indexed project corpus."
-        caveat = "No retrieved chunks passed citation threshold."
+        answer = "I don't have enough information in the indexed corpus to answer this question."
+        caveat = "No retrieved chunks passed the citation threshold."
     else:
-        answer = "\n".join([f"- {s['snippet']}" for s in sources[:3]])
-        caveat = "Derived from local corpus retrieval with citation threshold checks."
+        answer = generate_answer(body.query, top)
+        caveat = "Derived from local corpus retrieval with extractive summarization."
+
+    # Generate follow-up suggestions
+    followups = generate_followups(body.query, top)
+
+    # Compute confidence from score distribution
+    top_scores = [s for s, _ in top]
+    confidence = compute_confidence(top_scores)
 
     if body.useWeb and store.settings.get(body.userId, {}).get("allowWeb", False):
         sources.append(
@@ -303,7 +347,7 @@ def query(body: QueryRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
             project_id=body.projectId,
             query=body.query,
             retrieved_chunk_ids=[c.id for _, c in top],
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(UTC),
             use_web=body.useWeb,
         )
     )
@@ -312,10 +356,10 @@ def query(body: QueryRequest, x_user_id: str = Header(...)) -> dict[str, Any]:
         "answerText": answer,
         "sources": sources,
         "evidence": evidence_lines,
-        "confidence": round(sum(s[0] for s in top) / max(len(top), 1), 3),
+        "confidence": confidence,
         "caveats": caveat,
-        "followups": ["Refine by file/date filters", "Pin best evidence chunks", "Enable web augmentation if policy allows"],
-        "rawModelOutput": "rule-based placeholder",
+        "followups": followups,
+        "rawModelOutput": "extractive-summarization-v1",
     }
 
 
@@ -354,7 +398,10 @@ def set_provider(body: ProviderRequest, x_user_id: str = Header(...)) -> dict[st
 
 @app.get("/api/audit/retrievals")
 def audit_retrievals(projectId: str = Query(...), x_user_id: str = Header(...)) -> list[dict[str, Any]]:
-    store.ensure_project_access(x_user_id, projectId, required="owner")
+    try:
+        store.ensure_project_access(x_user_id, projectId, required="owner")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
     return [
         {
             "userId": l.user_id,
