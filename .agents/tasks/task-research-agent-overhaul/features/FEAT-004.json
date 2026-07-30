@@ -2,7 +2,7 @@
   "id": "FEAT-004",
   "type": "feat",
   "description": "Comprehensive test suite covering all API endpoints, skills, pipeline logic, and error cases using httpx TestClient and pytest fixtures. Ensure every feature added in FEAT-001 through FEAT-003 has proper test coverage.",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "Create tests/conftest.py - Shared pytest fixtures: (1) app_client fixture using httpx.AsyncClient with ASGITransport for the FastAPI app. (2) sample_project fixture that creates a project and returns project_id + user_id. (3) ingested_project fixture that creates a project, uploads a sample text file, and ingests it. (4) multi_doc_project fixture that ingests 2-3 different documents for comparison/multi-doc tests. (5) tmp data directory cleanup fixture.",
     "Create tests/test_api_projects.py - Test project CRUD: (1) test_create_project_success. (2) test_create_project_missing_header returns 422. (3) test_create_project_short_name returns 422. (4) test_share_project_success. (5) test_share_project_not_owner returns 403. (6) test_share_project_not_found returns 404.",
@@ -28,5 +28,5 @@
     "python3.12 -m pytest tests/ --tb=short 2>&1 | tail -5"
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "All 97 tests pass (up from original 21). Test distribution: test_api_projects (9), test_api_query (9), test_api_skills (13), test_api_upload_ingest (10), test_e2e (3), test_middleware (9), test_pipeline (9), test_skills (18), test_skills_unit (17). Files with local_path='' require writing actual temp files for summarize/compare tests that call parse_content. Web search tests all use unittest.mock.patch on requests.post. Rate limiting is disabled in test env via APP_ENVIRONMENT=test."
 }
